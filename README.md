@@ -16,15 +16,16 @@
 <a name="Summary"></a>
 
 ## Summary
-Below are several of our findings via graphs
-![](https://github.com/MichaelMazel/Beer-EDA-and-Prediction/blob/main/EDA-and-Prediction_files/figure-gfm/unnamed-chunk-6-1.png?raw=true)
+Below are several of our findings via graphs:
 
-![](https://github.com/MichaelMazel/Beer-EDA-and-Prediction/blob/main/EDA-and-Prediction_files/figure-gfm/unnamed-chunk-26-1.png?raw=true)
+![](https://github.com/ajasserme/MSDS-6306-Doing-Data-Science---Case-Study-01/blob/main/EDA-and-Prediction_files/figure-gfm/unnamed-chunk-6-1.png?raw=true)
+
+![](https://github.com/ajasserme/MSDS-6306-Doing-Data-Science---Case-Study-01/blob/main/EDA-and-Prediction_files/figure-gfm/unnamed-chunk-26-1.png?raw=true)
 
 
-We also identified tours offered by the top beer producers. We matched this with a heat map of breweries per state.
-![](https://github.com/MichaelMazel/Beer-EDA-and-Prediction/blob/main/EDA-and-Prediction_files/figure-gfm/unnamed-chunk-38-1.png?raw=true)
+We also identified tours offered by the top beer producers. We matched this with a heat map of craft breweries per state.
 
+![](https://github.com/ajasserme/MSDS-6306-Doing-Data-Science---Case-Study-01/blob/main/EDA-and-Prediction_files/figure-gfm/unnamed-chunk-38-1.png?raw=true)
 
 
 Finally, we accurately predicted if a beer was an IPA or Ale 85.5% of the time using KNN. This slightly outperformed Naive Bayes' accuracy of 83.7%.
