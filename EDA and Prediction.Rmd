@@ -1,0 +1,558 @@
+---
+title: "Beer EDA and Prediction"
+author: "Michael Mazel and Alexandre Jasserme"
+date: "3/6/21"
+output: 
+  html_document:
+    keep_md: yes
+    toc: true
+    theme: unite
+---
+
+We used the beer and breweries data set to explore the provided questions involving breweries per state, missing values, ABV vs IBU, etc. Additionally, we developed a model to predict if a beer is an IPA or Ale. Finally, we analyzed the data deeper to look for unique trends.  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(maps)
+library(class)
+library(caret)
+library(e1071)
+library(stringr)
+library(tidygeocoder)
+```
+
+Data Import
+```{r}
+df_brew <- read.csv(file = file.path('Data_Files', 'Breweries.csv'), header = TRUE)
+df_beer <- read.csv(file = file.path('Data_Files', 'Beers.csv'), header = TRUE)
+```
+
+First, look at the two data sets we will be using. 
+```{r}
+head(df_brew)
+head(df_beer)
+```
+Brew_ID represents the unique ID of a particular brewery.
+Beer_ID represents the unique ID of a particular beer.
+
+
+
+# How many breweries are present in each state?
+Let's see the number of states in the data set and confirm entries look correct.
+```{r}
+sort(df_brew$State) %>% unique()
+table(df_brew$State)
+```
+All 50 states plus DC are found. The table above presents the number of craft breweries in each state.
+
+```{r}
+# First, get the data to map all the US states and DC with latitude and longitude coordinates (each state will be named with its full name in lower case)
+all_us_states <- map_data("state")
+
+# Then, create a mapping of each state name in lower case to its 2-letter abbreviation
+states_mapping <- tibble(state = tolower(state.name)) %>%
+  bind_cols(tibble(abb = state.abb)) %>%
+  bind_rows(tibble(state = "district of columbia", abb = "DC"))
+states_mapping <- states_mapping %>% rename(region = state)
+
+# Get the number of breweries in each state
+breweries_by_state<- df_brew %>% group_by(State) %>% tally()
+breweries_by_state <- breweries_by_state %>% mutate(State = str_trim(State)) # Trimming white spaces in the State column
+breweries_by_state <- breweries_by_state %>% rename(abb = State)
+
+# Join the data frames to be able to plot the data
+breweries_by_state_with_abb <- inner_join(x = states_mapping, y = breweries_by_state, by = "abb")
+breweries_map <- inner_join(all_us_states, breweries_by_state_with_abb, by = "region")
+
+ggplot() + geom_polygon( data=breweries_map, aes(x=long, y=lat, group=group, fill = n), color="white", size = 0.2) +
+  scale_fill_continuous(name="Breweries", low = "lightpink1", high = "red4",limits = c(0,50), breaks=c(10,20,30,40), na.value = "darkgrey") +
+  labs(title="Number of Breweries in Each State", x = "Longitude", y = "Latitude")
+```
+
+The map above shows the number of craft breweries in each state (states with more breweries have a darker shade of red).
+
+Below is a plot of breweries by state
+```{r}
+# To order the bar graph by high to low values, we first need to create a new df with the counts by states
+tally <- df_brew %>% group_by(State) %>% tally()
+tally <- tally[with(tally, order(n)),]
+
+ggplot(data = tally, mapping = aes(x = reorder(State, -n), n)) + 
+  geom_bar(stat = "identity", fill = "red") + 
+  theme(axis.text.x = element_text(vjust = grid::unit(c(-2, 0, 2), "points"))) + theme(axis.text.x=element_text(colour="black")) +
+  labs(x = " ", y = "Number of Breweries", title = "Breweries by State")
+```
+
+# Merge beer data with the breweries data. Print the first 6 observations and the last six observations to check the merged file.  (RMD only, this does not need to be included in the presentation or the deck.)
+```{r}
+df <- merge(x = df_beer, y = df_brew, by.x = "Brewery_id", by.y = "Brew_ID")
+df <- df %>% rename(Brewery_ID = 1, Beer_Name = 2, Brewery_Name = 8, State = 10)
+head(df, 6) # First 6 observations
+tail(df, 6) # Last 6 observations
+```
+# Address the missing values in each column.
+
+First, we will view the structure of the data frame and then find null values using "summary"
+```{r}
+str(df)
+```
+```{r}
+summary(df)
+```
+There are 2410 total rows, with 62 nulls in ABV and 1005 in IBU. Some nulls in IBU can be explained by the style (e.g. ciders are never rated based off bitterness).
+
+Now, we will check for empty strings that are not null values.
+```{r}
+sum(df$Beer_Name == "")
+sum(df$Style == "")
+sum(df$Beer_Name == "")
+sum(df$Brewery_Name == "")
+sum(df$City == "")
+sum(df$State == "")
+```
+The style column has 5 empty string values.
+
+The code below sorts Beer_Name by the number of characters in its name. By doing this, we also discovered that there are entries that share the same beer name.
+```{r}
+data.frame(names=df$Beer_Name,chr=apply(df,2,nchar)[,2]) %>% arrange(chr) %>% head(10)
+```
+
+We will investigate how many Beers are listed numerous times along with their number of repeats.
+```{r}
+n_occur <- data.frame(table(df$Beer_Name))
+n_occur[n_occur$Freq > 1,] %>% arrange(desc(Freq))
+```
+82 Beers are listed multiple times. 75 of which appear twice. One beer is even found 12 times. Let's investigate if/how the columns differ for these repeated beers (e.g. is ABV the same for every Nonstop Hef Hop). Below are several examples of repeated beers. Please note, this is not a complete list of repeated beers.
+
+```{r}
+df %>% filter(Beer_Name == "Nonstop Hef Hop" | Beer_Name == "Dale's Pale Ale" | Beer_Name == "Longboard Island Lager" | Beer_Name == "Devil's Harvest Extra Pale Ale" | Beer_Name == "Point Oktoberfest" | Beer_Name == "The Brown Note")
+```
+Many repeated beers have identical variables (excluding the unique identifier, Beer_ID). Others, however, have different ounces, brewery_name, city, and state. We decided to keep the repeated beers in the data set, but it does require future investigation.
+
+
+# Compute the median alcohol content and international bitterness unit for each state. Plot a bar chart to compare.
+
+We will use and update df_clean throughout the file. The purpose of df_clean is to make analyses easier and will often include filtered rows/columns from the main data frame
+```{r}
+df_clean <- df %>% group_by(State) %>% summarise(across(c("ABV", "IBU"), ~ median(.x, na.rm = TRUE)))
+df_clean$ABV <- round(df_clean$ABV, 3) * 100
+```
+
+```{r}
+df_clean <- df_clean[with(df_clean, order(ABV)),]
+ggplot(data = df_clean, mapping = aes(x = reorder(State, -ABV), ABV)) + 
+  geom_bar(stat = "identity", fill = "red") + 
+  theme(axis.text.x = element_text(vjust = grid::unit(c(-2, 0, 2), "points"))) +
+  labs(x = " ", y = "ABV Median", title = "Alcohol Content in Beer by State") + coord_cartesian(ylim=c(3.75,6.25))
+
+
+df_clean <- df_clean[with(df_clean, order(IBU)),]
+ggplot(data = df_clean, mapping = aes(x = reorder(State, -IBU), IBU)) + 
+  geom_bar(stat = "identity", fill = "red") + 
+  theme(axis.text.x = element_text(vjust = grid::unit(c(-2, 0, 2), "points"))) +
+  labs(x = " ", y = "IBU Median", title = "International Bitterness by State")
+```
+
+
+There is a 5 way tie for the highest median ABV.
+Maine has the highest IBU, and South Dakota has only null values for their beer IBUs. 
+
+# Which state has the maximum alcoholic (ABV) beer? Which state has the most bitter (IBU) beer?
+```{r}
+df[which.max(df$ABV),]
+df[which.max(df$IBU),]
+```
+The state that has the maximum alcoholic (ABV) beer is Colorado, and the state that has the the most bitter (IBU) beer is Oregon.
+
+# Comment on the summary statistics and distribution of the ABV variable.
+```{r}
+(df$ABV * 100) %>% summary(df$ABV)
+```
+```{r}
+#4 different bin sizes for histogram:
+ggplot(data = df, mapping = aes(x = ABV * 100)) + 
+  geom_histogram(fill = "red", bins = 15) + labs(x = "ABV", y = "Frequency", title = "ABV Frequency")
+ggplot(data = df, mapping = aes(x = ABV * 100)) + 
+  geom_histogram(fill = "red", bins = 25) + labs(x = "ABV", y = "Frequency", title = "ABV Frequency")
+ggplot(data = df, mapping = aes(x = ABV * 100)) + 
+  geom_histogram(fill = "red", bins = 50) + labs(x = "ABV", y = "Frequency", title = "ABV Frequency")
+ggplot(data = df, mapping = aes(x = ABV * 100)) + 
+  geom_histogram(fill = "red", bins = 76) + labs(x = "ABV", y = "Frequency", title = "ABV Frequency")
+
+ggplot(data = df, mapping = aes(x = ABV * 100)) + 
+  geom_boxplot(fill = "red", width=.1) + labs(x = "ABV", title = "ABV Distribution") + theme(axis.text.y=element_text(colour="white"))
+
+```
+
+
+
+ABV is right skewed and several outliers appear for high ABVs. There also appears to be an outlier that has approximately 0 ABV (ABV of 0.001 for a low alcohol beer called Scotty K NA).  
+
+# Is there an apparent relationship between the bitterness of the beer and its alcoholic content? Draw a scatter plot.  Make your best judgment of a relationship and EXPLAIN your answer.
+```{r}
+cor(df$ABV, df$IBU, use = "complete.obs") 
+```
+```{r}
+ggplot(data = df, mapping = aes(x = IBU, y = ABV * 100)) + 
+  geom_point(color = "red") + labs(x = "ABV", y = "IBU", title = "ABV vs IBU")
+```
+
+
+There appears to be a positive relationship between ABV and IBU, with a linear correlation value of 0.67. 0 represents no relationship whatsoever and 1 represents a perfect association. This suggests a moderate relationship.
+
+
+
+
+# Budweiser would also like to investigate the difference with respect to IBU and ABV between IPAs (India Pale Ales) and other types of Ale (any beer with “Ale” in its name other than IPA).  You decide to use KNN classification to investigate this relationship.  Provide statistical evidence one way or the other. You can of course assume your audience is comfortable with percentages … KNN is very easy to understand conceptually.
+
+First, we need to see how IPAs and Ales are classified in the Style column.
+```{r}
+sort(df$Style) %>% unique()
+```
+It appears all IPAs will contain "IPA" in their name, and all Ales will contain "Ales" in their name. We will create a column that classifies as IPA, Ale, or neither. We will select IPAs then Ales, rather than the reverse, so Ales don't also detect "India Pale Ales"
+```{r}
+df <- df %>% mutate(IPA_Or_Ale = ifelse(grepl("IPA", df$Style, fixed = TRUE), "IPA", ifelse(grepl("Ale", df$Style, fixed = TRUE), "Ale", NA)))
+```
+
+
+Now, we can start thinking about features to includes. We will create a column for the length of each beer name (excluding words that are IPA or Ale).
+```{r}
+df <- df %>% mutate(Beer_Name_Modified = Beer_Name) 
+stopwords = c("IPA", "I.P.A.", "India","Pale","Ale","Ales")
+for(i in 1:nrow(df)){
+  x <- unlist(strsplit(df$Beer_Name_Modified[i], " "))
+  x <- x[!x %in% stopwords]
+  df$Beer_Name_Modified[i] <- paste(x, collapse = " ") 
+}
+
+df <- df %>% mutate(Beer_Name_Len = nchar(df$Beer_Name_Modified))
+```
+
+We will assess the possible features.
+```{r}
+df %>% group_by(IPA_Or_Ale) %>% summarise(Len_Med=median(Beer_Name_Len), Len_Mean=mean(Beer_Name_Len), Len_Std=sd(Beer_Name_Len))
+
+df %>% group_by(IPA_Or_Ale) %>% summarise(Ounce_Med=median(Ounces, na.rm = TRUE), Ounce_Std=sd(Ounces, na.rm = TRUE), Ounce_Max=max(Ounces, na.rm = TRUE))
+
+df %>% group_by(IPA_Or_Ale) %>% summarise(ABV_Med=median(ABV * 100, na.rm = TRUE), ABV_Mean=mean(ABV * 100, na.rm = TRUE), ABV_Std=sd(ABV * 100, na.rm = TRUE))
+
+df %>% group_by(IPA_Or_Ale) %>% summarise(IBU_Med=median(IBU, na.rm = TRUE), IBU_Mean=mean(IBU, na.rm = TRUE), IBU_Std=sd(IBU, na.rm = TRUE))
+```
+There does not appear to be a considerable difference between IPAs and Ales regarding their name length or ounces. This suggests that they may not be important features. ABV and IBU, however, show significant differences of mean/median with respect to their standard deviations. Therefore, they will be used as features.
+
+Now, we will check for a difference in source states of Ales vs. IPAs. If there is a difference, we can find the state's longitude and latitude for the KNN.
+```{r}
+df %>% filter(IPA_Or_Ale == "IPA") %>% group_by(State) %>% summarise(IPA_count = n(), IPA_percent_representation = n() / nrow(.) * 100 ) %>% arrange(desc(IPA_percent_representation))
+
+df %>% filter(IPA_Or_Ale == "Ale") %>% group_by(State) %>% summarise(Ale_count = n(), Ale_percent_representation = n() / nrow(.) * 100 ) %>% arrange(desc(Ale_percent_representation))
+```
+There appears to be minimal variation between source states of Ales vs. IPAs. The top 20 states tend to vary by about 1% for the amount of beers that the state sources.
+
+We will use ABV and IBU as our only features. Below you can view how IPAs and Ales tend to cluster.
+```{r}
+ggplot(data = df, mapping = aes(x = IBU, y = ABV * 100, color = IPA_Or_Ale)) + 
+  geom_point() + labs(x = "ABV", y = "IBU", title = "ABV vs IBU")
+```
+
+
+Next, we filter out rows that aren't ABV or IBU.
+```{r}
+df_clean <- df %>% filter(!is.na(ABV) & !is.na(IBU) & !is.na(IPA_Or_Ale))
+
+df_clean %>% group_by(IPA_Or_Ale) %>% summarise(count = n())
+```
+We also find fairly equal sample sizes, which is necessary to perform an accurate KNN.
+
+Now, we will standardize our features so they have equal impact, and separate our data into train and test sets.
+```{r}
+df_clean$ABV_std <- scale(df_clean$ABV)
+df_clean$IBU_std <- scale(df_clean$IBU)
+
+set.seed(123)
+trainIndices = sample(1:dim(df_clean)[1],round(.7 * dim(df_clean)[1]))
+train = df_clean[trainIndices,]
+test = df_clean[-trainIndices,]
+```
+
+We will perform a cross validation with k = 1-100 with a plot of k (x-axis) versus accuracy.  We will use this plot to tune the hyperparameter k. 
+```{r}
+accs = data.frame(accuracy = numeric(60), k = numeric(60))
+
+for(i in 1:60)
+{
+  set.seed(123)
+  classifications = knn(train[,c("ABV_std","IBU_std")],test[,c("ABV_std","IBU_std")],train$IPA_Or_Ale,prob = TRUE, k = i)
+  CM = confusionMatrix(table(classifications,test$IPA_Or_Ale))
+  accs$accuracy[i] = CM$overall[1]
+  accs$k[i] = i
+}
+
+plot(accs$k,accs$accuracy, type = "l", xlab = "k")
+```
+
+
+
+Based off this particular split of train and test data, the best k is about 33.
+
+Now we will check for the exact accuracy, along with sensitivity and specificity. Additionally, we will predict using Naive Bayes.
+```{r}
+set.seed(123)
+classifications = knn(train[,c("ABV_std","IBU_std")],test[,c("ABV_std","IBU_std")],train$IPA_Or_Ale,prob = TRUE, k =33)
+confusionMatrix(table(classifications,test$IPA_Or_Ale))
+
+train$IPA_Or_Ale <- as.factor(train$IPA_Or_Ale)
+model = naiveBayes(train[,c("ABV","IBU")],train$IPA_Or_Ale)
+confusionMatrix(table(predict(model,test[,c("ABV","IBU")]),test$IPA_Or_Ale))
+```
+KNN accurately predicted 84.8% of the time, which slightly outperformed Naive Bayes at 83%.
+
+Below is a loop to repeat the previous KNN for 100 different random seeds. We will find the average accuracy to get a more stable statistic to evaluate the model.
+```{r}
+splitPerc <- .7
+iterations = 100
+numks = 100
+
+masterAcc = matrix(nrow = iterations, ncol = numks)
+  
+for(j in 1:iterations)
+{
+accs = data.frame(accuracy = numeric(100), k = numeric(100))
+trainIndices = sample(1:dim(df_clean)[1],round(splitPerc * dim(df_clean)[1]))
+train = df_clean[trainIndices,]
+test = df_clean[-trainIndices,]
+for(i in 1:numks)
+{
+  classifications = knn(train[,c("ABV_std","IBU_std")],test[,c("ABV_std","IBU_std")],train$IPA_Or_Ale,prob = TRUE, k =i)
+  CM = confusionMatrix(table(classifications,test$IPA_Or_Ale))
+  masterAcc[j,i] = CM$overall[1]
+}
+
+}
+
+MeanAcc = colMeans(masterAcc)
+
+mean(MeanAcc)
+
+plot(seq(1,numks,1),MeanAcc, type = "l")
+```
+This is the mean accuracy for 100 iterations of KNN.
+
+Below is the same random seeding process but for Naive Bayes.
+```{r}
+iterations = 100
+
+masterAcc = matrix(nrow = iterations, ncol = 3)
+
+for(j in 1:iterations)
+{
+  trainIndices = sample(1:dim(df_clean)[1],round(splitPerc * dim(df_clean)[1]))
+  train = df_clean[trainIndices,]
+  test = df_clean[-trainIndices,]
+  train$IPA_Or_Ale <- as.factor(train$IPA_Or_Ale)
+  
+  model = naiveBayes(train[,c("ABV","IBU")],train$IPA_Or_Ale)
+confusionMatrix(table(predict(model,test[,c("ABV","IBU")]),test$IPA_Or_Ale))
+  row = c(CM$overall[1],CM$byClass[1],CM$byClass[2])
+  # CM$overall[1] returns the accuracy
+  # CM$byClass[1] returns the sensitivity
+  # CM$byClass[2] returns the specificity
+  masterAcc[j,1:3] = row
+
+}
+
+MeanAcc = colMeans(masterAcc)
+MeanAcc
+```
+This returns the accuracy, sensitivity, and specificity, respectively.
+
+Based off our averages, KNN accurately predicted about 86.5% of the time, which slightly outperformed Naive Bayes again, at 85.9%.
+
+# Find one other useful inference from the data that you feel Budweiser may be able to find value in.  You must convince them why it is important and back up your conviction with appropriate statistical evidence. 
+
+
+First, we will explore ounces with other variables.
+We will do a quick check for Ounces anomalies. Are there any popular styles that are primarily in uncommon ounces?
+```{r}
+df %>% group_by(Style, Ounces) %>% summarise(count = n())
+df %>% group_by(Style, Ounces) %>% summarise(count = n()) %>% arrange(desc(Ounces))
+```
+There are not any popular beer styles that are more likely to appear in uncommon sizes compared to the standard 12 or 16 oz.
+
+We will check for ounces vs IBU and ABV.
+```{r}
+ggplot(data = df, mapping = aes(x = ABV * 100, y = Ounces)) + 
+  geom_point(color = "red") + labs(x = "ABV", y = "Ounces", title = "ABV vs Ounces")
+
+ggplot(data = df, mapping = aes(x = IBU, y = Ounces)) + 
+  geom_point(color = "red") + labs(x = "IBU", y = "Ounces", title = "IBU vs Ounces")
+```
+
+
+Visually, it appears that large beers are not very bitter.
+
+```{r}
+cor(df$IBU, df$Ounces, use = "complete.obs") 
+
+fit = lm(IBU~Ounces, data = df)
+summary(fit)
+```
+We found the correlation between IBU and Ounces to barely meet statistical significance. However,it is not practically significant.
+
+Next, check for beer name length vs. ounces
+```{r}
+df <- df %>% mutate(Beer_Name_Len_nomod = nchar(df$Beer_Name))
+
+ggplot(data = df, mapping = aes(x = Beer_Name_Len_nomod, y = Ounces)) + 
+  geom_point(color = "red") + labs(x = "Beer_Name_Len_nomod", y = "Ounces", title = "Beer Name Length vs Ounces")
+```
+
+
+There are no apparent trends here.
+
+We will now explore Fruit / Vegetable beers, and then Ciders
+```{r}
+# Don't filter for Ciders, because Ciders don't have IBUs associated
+df_clean <- df %>% filter(df$Style == "Fruit / Vegetable Beer")
+
+ggplot(data = df_clean, mapping = aes(x = IBU, y = ABV * 100)) + 
+  geom_point(color = "red") + labs(x = "ABV", y = "IBU", title = "Fruit Beers: ABV vs IBU")
+
+ggplot(data = df_clean, mapping = aes(x = IBU)) + 
+  geom_histogram(fill = "red", bins = 10) + labs(x = "IBU", y = "Frequency", title = "IBU Frequency of Fruit Beers")
+
+# Add ciders to the list
+df_clean <- df %>% filter(df$Style == "Fruit / Vegetable Beer" | df$Style == "Cider")
+
+ggplot(data = df_clean, mapping = aes(x = ABV * 100)) + 
+  geom_histogram(fill = "red", bins = 15) + labs(x = "ABV", y = "Frequency", title = "ABV Frequency of Fruits/Ciders")
+
+```
+
+
+Fruit beers have no visual correlation between IBU and ABV. The IBUs have a bimodal distribution, which could be due to its small sample size. Fruits and Ciders also appear to have a bimodal distribution. This makes sense because ABV is correlated to IBU.
+
+We will first revisit the top beers by state, followed by the top Fruit Beers by state and then by city.
+```{r}
+df %>% group_by(State) %>% summarise(count = n(),all_states_percent_rep = n() / nrow(.) * 100) %>% arrange(desc(count))
+
+df_clean %>% group_by(State) %>% summarise(count = n(),fruit_state_percent_rep = n() / nrow(.) * 100) %>% arrange(desc(count))
+
+df_clean %>% group_by(City) %>% summarise(count = n(),fruit_city_percent_rep = n() / nrow(.) * 100) %>% arrange(desc(count))
+```
+Michigan sources the third highest amount of beers in the country with 6.7%. If you look at only Ciders and Fruit/Vegetable Beers, they increase to first with 19.8%. Does this indicate cheaper source materials or higher demand in this area?
+
+Do we see any similarities with pumpkin ales?
+```{r}
+df %>% group_by(State) %>% summarise(count = n(),all_states_percent_rep = n() / nrow(.) * 100) %>% arrange(desc(count))
+
+df %>% filter(df$Style == "Pumpkin Ale") %>% group_by(State) %>% summarise(count = n(),pumpkin_state_percent_rep = n() / nrow(.) * 100) %>% arrange(desc(count))
+```
+Massachusetts had the largest jump with a 14% increase of pumpkin ales sourced compared to their total beers sourced .
+
+
+# Additional Brewery Tour Proposal
+We are going to investigate the Budweiser breweries that are offering public tours and do a comparison with the main competitors (note that most of the tours are currently on hold because of Coronavirus)
+```{r}
+# Getting the addresses of the breweries that can be toured for Budweiser and their main competitors
+# The main competitors were selected from the "Top 50 Overall Brewing Companies" at https://www.brewersassociation.org/press-releases/brewers-association-announces-top-50-brewing-companies-by-sales-volume-of-2019/
+# The address format can be checked on this web site to make sure it will work correctly: https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?form
+
+# First for Budweiser, then for the main competitors, we will get the coordinates of each brewery offering tours so that we can plot it on the map
+# The data frame "all_breweries_coordinates" will have 4 columns:
+# - singlelineaddress: address in the brewery in 1 line (with street, city, state and optionally zip code)
+# - lat: the latitude for the coordinate
+# - long: the longitude for the coordinate
+# - Company: the company that owns the brewery
+
+# Addresses of Budweiser breweries offering tours taken from https://www.budweisertours.com/
+budweiser_breweries_addresses <- tibble(singlelineaddress = c('2523 Frontage Rd, Fort Collins, CO', 
+                    '221 Daniel Webster Hwy, Merrimack, NH',
+                    '1200 Lynch St, St. Louis, MO'))
+all_breweries_coordinates <- data.frame(budweiser_breweries_addresses %>% geocode(address = singlelineaddress, method = 'census', verbose = TRUE), Company = "Budweiser")
+
+# Addresses of Coors breweries offering tours taken from https://www.coorsbrewerytour.com/
+coors_breweries_addresses <- tibble(singlelineaddress = c('311 10th St, Golden, CO'))
+all_breweries_coordinates <- rbind(all_breweries_coordinates, data.frame(coors_breweries_addresses %>% geocode(address = singlelineaddress, method = 'census', verbose = TRUE), Company = "Coors"))
+
+# Addresses of Samuel Adams breweries offering tours taken from https://www.samueladams.com/brewerytours
+sam_adams_breweries_addresses <- tibble(singlelineaddress = c('30 Germania St, Boston, MA 02130'))
+all_breweries_coordinates <- rbind(all_breweries_coordinates, data.frame(sam_adams_breweries_addresses %>% geocode(address = singlelineaddress, method = 'census', verbose = TRUE), Company = "Samuel Adams"))
+
+# Addresses of Pabst breweries offering tours taken from https://pabst.com/
+pabst_breweries_addresses <- tibble(singlelineaddress = c('1037 W Juneau Ave, Milwaukee, WI 53233'))
+all_breweries_coordinates <- rbind(all_breweries_coordinates, data.frame(pabst_breweries_addresses %>% geocode(address = singlelineaddress, method = 'census', verbose = TRUE), Company = "Pabst"))
+
+# Addresses of Guinness (part of Diageo) breweries offering tours taken from https://www.guinnessbrewerybaltimore.com/tours-and-experiences
+guinness_breweries_addresses <- tibble(singlelineaddress = c('5001 Washington Blvd, Halethorpe, MD 21227'))
+all_breweries_coordinates <- rbind(all_breweries_coordinates, data.frame(guinness_breweries_addresses %>% geocode(address = singlelineaddress, method = 'census', verbose = TRUE), Company = "Guinness"))
+
+# Addresses of Yuengling breweries offering tours taken from https://www.yuengling.com/visit-us/ (Tampa location will open in 2022)
+yuengling_breweries_addresses <- tibble(singlelineaddress = c('420 Mahantongo Street, Pottsville, PA 17901',
+                                                             '11111 N 30th St, Tampa, FL 33612'))
+all_breweries_coordinates <- rbind(all_breweries_coordinates, data.frame(yuengling_breweries_addresses %>% geocode(address = singlelineaddress, method = 'census', verbose = TRUE), Company = "Yuengling"))
+
+# Addresses of Sierra Nevada breweries offering tours taken from https://sierranevada.com/visit/
+sierra_nevada_breweries_addresses <- tibble(singlelineaddress = c('100 Sierra Nevada Way Mills River,NC',
+                                                             '1075 East 20th Street, Chico, CA'))
+all_breweries_coordinates <- rbind(all_breweries_coordinates, data.frame(sierra_nevada_breweries_addresses %>% geocode(address = singlelineaddress, method = 'census', verbose = TRUE), Company = "Sierra Nevada"))
+
+# Plotting the breweries currently offering tours on the map
+ggplot() + 
+  geom_polygon( data=breweries_map, aes(x=long, y=lat, group=group, fill = n), color="white", size = 0.2) +
+  scale_fill_continuous(name="Breweries", low = "lightpink1", high = "red4",limits = c(0,50), breaks=c(10,20,30,40), na.value = "darkgrey") +
+  geom_point(data=all_breweries_coordinates, aes(x=long, y=lat, group=Company, color=factor(Company)), size=3) +
+  scale_color_manual(name = "Company",
+                     values = c("Budweiser" = "firebrick1",
+                                "Coors" = "yellow",
+                                "Samuel Adams" = "blue",
+                                "Pabst" = "green",
+                                "Guinness" = "black",
+                                "Yuengling" = "orange",
+                                "Sierra Nevada" = "purple")) +
+  labs(title="Brewery Tours Currently Offered By Budweiser And Main Competitors", x = "Longitude", y = "Latitude")
+```
+
+The map shows that Budweiser does not currently offer brewery tours in the South and the West Coast of the United States (and these areas have a fairly high density of craft breweries). 
+So we will draft of proposal to address this.
+
+```{r}
+# Addresses of Budweiser breweries currently offering tours (taken from https://www.budweisertours.com/)
+# and 2 Budweiser breweries that could start offering tours, 1 in Texas and 1 in California obtained from https://www.anheuser-busch.com/about/breweries-and-tours.html
+budweiser_proposed_breweries_addresses <- tibble(singlelineaddress = c('2523 Frontage Rd, Fort Collins, CO', 
+                    '221 Daniel Webster Hwy, Merrimack, NH',
+                    '1200 Lynch St, St. Louis, MO',
+                    '8169 Haskell Ave, Van Nuys, CA 91406',
+                    '8772 Market Street Road, Houston, TX 77029'))
+all_breweries_coordinates <- rbind(all_breweries_coordinates, data.frame(budweiser_proposed_breweries_addresses %>% geocode(address = singlelineaddress, method = 'census', verbose = TRUE), Company = "Budweiser"))
+
+# Plotting the breweries currently offering tours and the proposed breweries that could offer tours on the map
+ggplot() + 
+  geom_polygon( data=breweries_map, aes(x=long, y=lat, group=group, fill = n), color="white", size = 0.2) +
+  scale_fill_continuous(name="Breweries", low = "lightpink1", high = "red4",limits = c(0,50), breaks=c(10,20,30,40), na.value = "darkgrey") +
+  geom_point(data=all_breweries_coordinates, aes(x=long, y=lat, group=Company, color=factor(Company)), size=3) +
+  scale_color_manual(name = "Company",
+                     values = c("Budweiser" = "firebrick1",
+                                "Coors" = "yellow",
+                                "Samuel Adams" = "blue",
+                                "Pabst" = "green",
+                                "Guinness" = "black",
+                                "Yuengling" = "orange",
+                                "Sierra Nevada" = "purple")) +
+  labs(title="Proposed Additional Budweiser Brewery Tours In Texas And California", x = "Longitude", y = "Latitude")
+```
+
+Our proposal is to reconfigure 2 of the existing Budweiser breweries to offer public tours:  
+  - The Budweiser brewery in Houston TX  
+  - The Budweiser brewery in Van Nuys, CA (in the suburbs of Los Angeles)  
+
+This proposal would give us a good coverage of the continental US States for breweries that offer public tours and help us better compete in areas that have a high density of craft breweries.
+Also, the proposed public tour in California would compete against a public tour offered by Sierra Nevada.
+And the proposed public tour in Texas would cover an area where none of our main competitors offer public tours.
+
+  
